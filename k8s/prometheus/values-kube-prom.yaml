@@ -1,12 +1,35 @@
-# Grafana configuration
+# Grafana configuration - simplified to prevent crashes
 grafana:
   enabled: true
   adminPassword: admin123
+  
   service:
     type: LoadBalancer
     port: 80
+  
+  # Disable persistence to avoid PVC issues
   persistence:
     enabled: false
+  
+  # Disable problematic sidecars
+  sidecar:
+    dashboards:
+      enabled: false
+    datasources:
+      enabled: false
+  
+  # Add datasource directly in config
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://monitor-kube-prometheus-prometheus:9090
+        access: proxy
+        isDefault: true
+  
+  # Minimal resource requirements
   resources:
     requests:
       cpu: 100m
@@ -34,16 +57,18 @@ prometheus:
           resources:
             requests:
               storage: 5Gi
+    
+    # Allow scraping all ServiceMonitors regardless of labels
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
     probeSelectorNilUsesHelmValues: false
 
-# Alertmanager - disable to speed up install
+# Disable Alertmanager (not needed for demo)
 alertmanager:
   enabled: false
 
-# Keep these lightweight
+# Keep these components
 kubeStateMetrics:
   enabled: true
 
@@ -60,31 +85,6 @@ prometheusOperator:
       cpu: 500m
       memory: 512Mi
 
-# Disable unnecessary components
+# Disable all default alerting rules (reduces complexity)
 defaultRules:
-  create: true
-  rules:
-    alertmanager: false
-    etcd: false
-    configReloaders: false
-    general: false
-    k8s: false
-    kubeApiserver: false
-    kubeApiserverAvailability: false
-    kubeApiserverSlos: false
-    kubelet: false
-    kubeProxy: false
-    kubePrometheusGeneral: false
-    kubePrometheusNodeRecording: false
-    kubernetesApps: false
-    kubernetesResources: false
-    kubernetesStorage: false
-    kubernetesSystem: false
-    kubeScheduler: false
-    kubeStateMetrics: false
-    network: false
-    node: false
-    nodeExporterAlerting: false
-    nodeExporterRecording: false
-    prometheus: false
-    prometheusOperator: false
+  create: false
