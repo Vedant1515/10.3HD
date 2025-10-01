@@ -95,7 +95,7 @@ jobs:
 
       - name: Apply metrics Service + ServiceMonitors
         run: |
-          kubectl apply -f k8s/metrics/backend-metrics-service.yaml
+          kubectl apply -f k8s/scripts/backend-metrics-service.yaml
           kubectl apply -f k8s/prometheus/backend-servicemonitor-staging.yaml
           kubectl apply -f k8s/prometheus/backend-servicemonitor-prod.yaml
 
