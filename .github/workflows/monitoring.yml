@@ -1,0 +1,67 @@
+name: Monitoring - kube-prometheus-stack
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: ["monitoring"]
+
+jobs:
+  setup_monitoring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        shell: bash
+        env:
+          AKS_KUBECONFIG_B64: ${{ secrets.AKS_KUBECONFIG != '' && secrets.AKS_KUBECONFIG || secrets.KUBECONFIG64 }}
+        run: |
+          python - <<'PY'
+          import os, base64, re, sys
+          b64 = os.environ.get('AKS_KUBECONFIG_B64','')
+          b64 = re.sub(r'\s+', '', b64).replace('\r','')
+          try:
+            data = base64.b64decode(b64, validate=True)
+          except Exception as e:
+            sys.stderr.write(f"Invalid base64 for kubeconfig: {e}\n")
+            sys.exit(1)
+          open('kubeconfig','wb').write(data)
+          PY
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+          kubectl version --client
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Add repos
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      - name: Create monitoring ns
+        run: kubectl create ns monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Install kube-prometheus-stack
+        run: |
+          helm upgrade --install monitor prometheus-community/kube-prometheus-stack \
+            -n monitoring \
+            -f k8s/prometheus/values-kube-prom.yaml
+
+      - name: Apply metrics Service + ServiceMonitors
+        run: |
+          kubectl apply -f k8s/metrics/backend-metrics-service.yaml
+          kubectl apply -f k8s/prometheus/backend-servicemonitor-staging.yaml
+          kubectl apply -f k8s/prometheus/backend-servicemonitor-prod.yaml
+
+      - name: Show Grafana LB
+        run: |
+          for i in {1..30}; do
+            IP=$(kubectl -n monitoring get svc monitor-grafana -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            HN=$(kubectl -n monitoring get svc monitor-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$IP" ] || [ -n "$HN" ]; then
+              echo "Grafana http://$IP$HN  user: admin  pass: admin123"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Grafana LB not ready yet"
