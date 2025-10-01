@@ -59,13 +59,13 @@ jobs:
           REPLICAS=$(kubectl -n $ENV get deploy backend-$PREVIOUS -o jsonpath="{.spec.replicas}")
           
           if [ "$REPLICAS" -eq 0 ]; then
-            echo "❌ Previous version (backend-$PREVIOUS) has 0 replicas!"
+            echo "Previous version (backend-$PREVIOUS) has 0 replicas!"
             echo "Scaling it up first..."
             kubectl -n $ENV scale deploy/backend-$PREVIOUS --replicas=2
             kubectl -n $ENV rollout status deploy/backend-$PREVIOUS --timeout=120s
           fi
           
-          echo "✅ Previous version is ready"
+          echo " Previous version is ready"
       
       - name: Perform rollback
         run: |
@@ -73,10 +73,10 @@ jobs:
           PREVIOUS="${{ steps.colors.outputs.previous }}"
           CURRENT="${{ steps.colors.outputs.current }}"
           
-          echo "🔄 Rolling back from $CURRENT to $PREVIOUS in $ENV"
+          echo "Rolling back from $CURRENT to $PREVIOUS in $ENV"
           bash k8s/scripts/switch_color.sh $ENV $PREVIOUS
           
-          echo "✅ Rollback complete!"
+          echo " Rollback complete!"
           
       - name: Show result
         run: |

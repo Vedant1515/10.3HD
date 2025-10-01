@@ -111,7 +111,7 @@ jobs:
           echo "=== Switching staging traffic to $INACTIVE ==="
           bash k8s/scripts/switch_color.sh staging $INACTIVE
           
-          echo "✅ Staging traffic now on $INACTIVE"
+          echo " Staging traffic now on $INACTIVE"
 
       - name: Wait for frontend deployment in STAGING
         run: |
@@ -144,7 +144,7 @@ jobs:
           echo "=== Switching prod traffic to $INACTIVE ==="
           bash k8s/scripts/switch_color.sh prod $INACTIVE
           
-          echo "✅ Production traffic now on $INACTIVE"
+          echo "Production traffic now on $INACTIVE"
           
           # Wait for frontend
           kubectl -n prod rollout status deploy/frontend --timeout=300s

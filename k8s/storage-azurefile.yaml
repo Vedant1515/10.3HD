@@ -1,4 +1,3 @@
-# --- STAGING PV (cluster-scoped; no namespace) ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
