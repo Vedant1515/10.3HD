@@ -1,9 +1,8 @@
 name: CD - Staging and Production
 
 on:
-  workflow_run:
-    workflows: ["CI - Build and Push to ACR"]
-    types: [completed]
+  push:
+    branches: ["testing", "main"]
   workflow_dispatch: {}
 
 env:
@@ -11,8 +10,8 @@ env:
 
 jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    needs: []
     steps:
       - uses: actions/checkout@v4
 
@@ -125,7 +124,7 @@ jobs:
           bash k8s/scripts/switch_color.sh staging blue
           kubectl -n staging rollout status deploy/frontend --timeout=300s
 
-          if [ "${{ github.event.workflow_run.head_branch || github.ref_name }}" = "main" ]; then
+          if [ "${{ github.ref_name }}" = "main" ]; then
             bash k8s/scripts/switch_color.sh prod green
             kubectl -n prod rollout status deploy/backend-green --timeout=600s
           else
@@ -137,4 +136,4 @@ jobs:
       - name: Show External IPs
         run: |
           echo "STAGING FRONTEND:"; kubectl -n staging get svc frontend-svc -o wide || true
-          echo "PROD FRONTEND:";    kubectl -n prod    get svc frontend-svc -o wide || true
+          echo "PROD FRONTEND:";    kubectl -n prod    get svc frontend-svc -o wide || true 
