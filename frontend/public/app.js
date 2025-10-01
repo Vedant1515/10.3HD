@@ -8,6 +8,7 @@
     const [loading, setLoading] = React.useState(false);
     const [items, setItems] = React.useState([]);
 
+    
     async function fetchNews(topic){
       setLoading(true);
       try{
