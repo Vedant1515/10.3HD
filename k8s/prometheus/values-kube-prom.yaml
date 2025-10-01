@@ -1,4 +1,4 @@
-# Grafana configuration - simplified to prevent crashes
+# Grafana configuration
 grafana:
   enabled: true
   adminPassword: admin123
@@ -7,29 +7,27 @@ grafana:
     type: LoadBalancer
     port: 80
   
-  # Disable persistence to avoid PVC issues
   persistence:
     enabled: false
   
-  # Disable problematic sidecars
   sidecar:
     dashboards:
       enabled: false
     datasources:
       enabled: false
   
-  # Add datasource directly in config
+  # Fixed datasource with proper namespace
   datasources:
     datasources.yaml:
       apiVersion: 1
       datasources:
       - name: Prometheus
         type: prometheus
-        url: http://monitor-kube-prometheus-prometheus:9090
+        url: http://monitor-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
         access: proxy
         isDefault: true
+        editable: false
   
-  # Minimal resource requirements
   resources:
     requests:
       cpu: 100m
@@ -57,18 +55,14 @@ prometheus:
           resources:
             requests:
               storage: 5Gi
-    
-    # Allow scraping all ServiceMonitors regardless of labels
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
     probeSelectorNilUsesHelmValues: false
 
-# Disable Alertmanager (not needed for demo)
 alertmanager:
   enabled: false
 
-# Keep these components
 kubeStateMetrics:
   enabled: true
 
@@ -85,6 +79,5 @@ prometheusOperator:
       cpu: 500m
       memory: 512Mi
 
-# Disable all default alerting rules (reduces complexity)
 defaultRules:
   create: false
