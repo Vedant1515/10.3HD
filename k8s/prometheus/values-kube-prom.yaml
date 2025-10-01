@@ -1,8 +1,49 @@
+# Grafana configuration
 grafana:
+  enabled: true
+  adminPassword: admin123
   service:
     type: LoadBalancer
-  adminPassword: admin123
+    port: 80
+  persistence:
+    enabled: false
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://monitor-kube-prometheus-prometheus:9090
+        isDefault: true
+        access: proxy
 
+# Prometheus configuration
 prometheus:
+  enabled: true
   prometheusSpec:
+    retention: 7d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
     serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+
+# Alertmanager configuration
+alertmanager:
+  enabled: true
+
+# Disable components we don't need for basic setup
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+prometheusOperator:
+  enabled: true

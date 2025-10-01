@@ -1,12 +1,15 @@
 name: Monitoring - kube-prometheus-stack
 
 on:
+  workflow_run:
+    workflows: ["CD - Staging and Production"]
+    types: [completed]
+    branches: ["testing", "main"]
   workflow_dispatch: {}
-  push:
-    branches: ["monitoring"]
 
 jobs:
   setup_monitoring:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,11 +17,14 @@ jobs:
       - name: Setup kubectl
         shell: bash
         env:
-          AKS_KUBECONFIG_B64: ${{ secrets.AKS_KUBECONFIG != '' && secrets.AKS_KUBECONFIG || secrets.KUBECONFIG64 }}
+          AKS_KUBECONFIG_B64: ${{ secrets.AKS_KUBECONFIG }}
         run: |
           python - <<'PY'
           import os, base64, re, sys
           b64 = os.environ.get('AKS_KUBECONFIG_B64','')
+          if not b64:
+            sys.stderr.write("AKS_KUBECONFIG_B64 is empty\n")
+            sys.exit(1)
           b64 = re.sub(r'\s+', '', b64).replace('\r','')
           try:
             data = base64.b64decode(b64, validate=True)
@@ -38,14 +44,22 @@ jobs:
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo update
 
-      - name: Create monitoring ns
+      - name: Create monitoring namespace
         run: kubectl create ns monitoring --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Install kube-prometheus-stack
         run: |
           helm upgrade --install monitor prometheus-community/kube-prometheus-stack \
             -n monitoring \
-            -f k8s/prometheus/values-kube-prom.yaml
+            -f k8s/prometheus/values-kube-prom.yaml \
+            --wait \
+            --timeout 10m
+
+      - name: Wait for Prometheus operator
+        run: |
+          kubectl -n monitoring rollout status deployment/monitor-kube-prometheus-operator --timeout=300s
+          kubectl -n monitoring rollout status deployment/monitor-kube-state-metrics --timeout=300s
+          kubectl -n monitoring rollout status deployment/monitor-grafana --timeout=300s
 
       - name: Apply metrics Service + ServiceMonitors
         run: |
@@ -53,15 +67,45 @@ jobs:
           kubectl apply -f k8s/prometheus/backend-servicemonitor-staging.yaml
           kubectl apply -f k8s/prometheus/backend-servicemonitor-prod.yaml
 
-      - name: Show Grafana LB
+      - name: Verify ServiceMonitors
         run: |
-          for i in {1..30}; do
+          echo "=== ServiceMonitors created ==="
+          kubectl -n staging get servicemonitor
+          kubectl -n prod get servicemonitor
+          echo ""
+          echo "=== Prometheus targets (wait 30s for scraping to start) ==="
+          sleep 30
+          kubectl -n monitoring port-forward svc/monitor-kube-prometheus-prometheus 9090:9090 &
+          PF_PID=$!
+          sleep 5
+          curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job | contains("backend"))' || echo "Targets not ready yet"
+          kill $PF_PID 2>/dev/null || true
+
+      - name: Show Grafana access info
+        run: |
+          echo "=== Waiting for Grafana LoadBalancer IP ==="
+          for i in {1..60}; do
             IP=$(kubectl -n monitoring get svc monitor-grafana -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
             HN=$(kubectl -n monitoring get svc monitor-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
             if [ -n "$IP" ] || [ -n "$HN" ]; then
-              echo "Grafana http://$IP$HN  user: admin  pass: admin123"
+              echo "=========================================="
+              echo "✅ Grafana is ready!"
+              echo "URL: http://$IP$HN"
+              echo "Username: admin"
+              echo "Password: admin123"
+              echo "=========================================="
+              echo ""
+              echo "📊 To access Prometheus:"
+              echo "kubectl -n monitoring port-forward svc/monitor-kube-prometheus-prometheus 9090:9090"
+              echo "Then visit: http://localhost:9090"
+              echo ""
+              echo "📈 Suggested Grafana Dashboards to import:"
+              echo "- Kubernetes / Compute Resources / Pod (ID: 6417)"
+              echo "- Node Exporter Full (ID: 1860)"
               exit 0
             fi
+            echo "Waiting for LoadBalancer... attempt $i/60"
             sleep 10
           done
-          echo "Grafana LB not ready yet"
+          echo "⚠️  Grafana LB not ready yet, but service is running"
+          echo "Check with: kubectl -n monitoring get svc monitor-grafana"
