@@ -92,3 +92,4 @@ jobs:
           echo ""
           echo "Pods:"
           kubectl -n $ENV get pods -l app=backend
+          
