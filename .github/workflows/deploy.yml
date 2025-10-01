@@ -11,7 +11,6 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    needs: []
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +36,7 @@ jobs:
       - name: Render manifests with image tags
         run: |
           sed -i "s#REPLACE_ACR#${{ secrets.ACR_LOGIN_SERVER }}#g" k8s/backend-deploy-blue.yaml k8s/backend-deploy-green.yaml k8s/frontend-deploy.yaml
-          sed -i "s#REPLACE_TAG#${{ env.IMAGE_TAG }}#g"           k8s/backend-deploy-blue.yaml k8s/backend-deploy-green.yaml k8s/frontend-deploy.yaml
+          sed -i "s#REPLACE_TAG#${{ env.IMAGE_TAG }}#g" k8s/backend-deploy-blue.yaml k8s/backend-deploy-green.yaml k8s/frontend-deploy.yaml
 
       - name: Create namespaces
         run: |
@@ -79,61 +78,49 @@ jobs:
       - name: Wait for PVC to bind
         run: |
           echo "Waiting for PVCs to bind..."
-          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/azurefile-pvc -n staging --timeout=120s || true
-          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/azurefile-pvc -n prod --timeout=120s || true
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/azurefile-pvc -n staging --timeout=60s || echo "PVC staging timeout - continuing"
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/azurefile-pvc -n prod --timeout=60s || echo "PVC prod timeout - continuing"
 
-      - name: Quick diagnostics for staging backend-blue
-        shell: bash
+      - name: Wait for backend deployments
         run: |
-          echo "=== Checking staging backend-blue deployment ==="
-          kubectl -n staging get deploy backend-blue -o wide
-          kubectl -n staging get pods -l app=backend,color=blue -o wide
-          echo ""
-          echo "=== Recent events in staging ==="
-          kubectl -n staging get events --sort-by=.lastTimestamp | tail -n 30
-          echo ""
-          echo "=== Describing pods ==="
-          for p in $(kubectl -n staging get pods -l app=backend,color=blue -o name 2>/dev/null); do
-            echo "---- $p ----"
-            kubectl -n staging describe $p | head -n 100
-            echo "---- LOGS $p ----"
-            kubectl -n staging logs $p --tail=50 || echo "No logs yet"
-            echo ""
-          done
+          echo "=== Waiting for staging backend-blue ==="
+          kubectl -n staging rollout status deploy/backend-blue --timeout=300s
+          
+          echo "=== Waiting for staging backend-green ==="
+          kubectl -n staging rollout status deploy/backend-green --timeout=300s
 
-      - name: Rollout backend-blue staging with extended timeout
-        shell: bash
+      - name: Wait for frontend deployment
         run: |
-          set +e
-          kubectl -n staging rollout status deploy/backend-blue --timeout=600s
-          RC=$?
-          if [ $RC -ne 0 ]; then
-            echo "❌ Rollout failed. Final diagnostics..."
-            kubectl -n staging get pods -l app=backend,color=blue -o wide
-            kubectl -n staging describe deploy backend-blue
-            for p in $(kubectl -n staging get pods -l app=backend,color=blue -o name); do
-              echo "==== FINAL LOGS $p ===="
-              kubectl -n staging logs $p --tail=200 || true
-            done
-            exit 1
-          fi
-          echo "✅ backend-blue staging rolled out successfully"
-
-      - name: Set color and wait
-        run: |
-          bash k8s/scripts/switch_color.sh staging blue
+          echo "=== Waiting for staging frontend ==="
           kubectl -n staging rollout status deploy/frontend --timeout=300s
 
+      - name: Switch color for staging
+        run: |
+          bash k8s/scripts/switch_color.sh staging blue
+
+      - name: Deploy and switch prod
+        run: |
           if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "=== Deploying to PROD with GREEN ==="
+            kubectl -n prod rollout status deploy/backend-green --timeout=300s
             bash k8s/scripts/switch_color.sh prod green
-            kubectl -n prod rollout status deploy/backend-green --timeout=600s
           else
+            echo "=== Deploying to PROD with BLUE ==="
+            kubectl -n prod rollout status deploy/backend-blue --timeout=300s
             bash k8s/scripts/switch_color.sh prod blue
-            kubectl -n prod rollout status deploy/backend-blue --timeout=600s
           fi
           kubectl -n prod rollout status deploy/frontend --timeout=300s
 
       - name: Show External IPs
         run: |
-          echo "STAGING FRONTEND:"; kubectl -n staging get svc frontend-svc -o wide || true
-          echo "PROD FRONTEND:";    kubectl -n prod    get svc frontend-svc -o wide || true 
+          echo "=== STAGING FRONTEND ==="
+          kubectl -n staging get svc frontend-svc -o wide || true
+          echo ""
+          echo "=== PROD FRONTEND ==="
+          kubectl -n prod get svc frontend-svc -o wide || true
+          echo ""
+          echo "=== STAGING PODS ==="
+          kubectl -n staging get pods -o wide
+          echo ""
+          echo "=== PROD PODS ==="
+          kubectl -n prod get pods -o wide
