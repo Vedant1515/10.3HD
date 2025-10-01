@@ -153,4 +153,5 @@ const server = app.listen(port, () => {
   console.log(`Backend listening on ${port} color=${color}`);
 });
 serverRef = server;
+
 attachConnectionTracker(serverRef);
