@@ -1,0 +1,149 @@
+name: Monitoring - kube-prometheus-stack
+
+on:
+  push:
+    branches: ["testing", "main"]
+  workflow_dispatch: {}
+
+jobs:
+  setup_monitoring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        shell: bash
+        env:
+          AKS_KUBECONFIG_B64: ${{ secrets.AKS_KUBECONFIG }}
+        run: |
+          python - <<'PY'
+          import os, base64, re, sys
+          b64 = os.environ.get('AKS_KUBECONFIG_B64','')
+          if not b64:
+            sys.stderr.write("AKS_KUBECONFIG_B64 is empty\n")
+            sys.exit(1)
+          b64 = re.sub(r'\s+', '', b64).replace('\r','')
+          try:
+            data = base64.b64decode(b64, validate=True)
+          except Exception as e:
+            sys.stderr.write(f"Invalid base64 for kubeconfig: {e}\n")
+            sys.exit(1)
+          open('kubeconfig','wb').write(data)
+          PY
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+          kubectl version --client
+
+      - name: Check if monitoring already installed
+        id: check_monitoring
+        run: |
+          if helm list -n monitoring 2>/dev/null | grep -q monitor; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Monitoring already exists, will upgrade"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Fresh install"
+          fi
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Add repos
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      - name: Create monitoring namespace
+        run: kubectl create ns monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Install/Upgrade kube-prometheus-stack
+        run: |
+          helm upgrade --install monitor prometheus-community/kube-prometheus-stack \
+            -n monitoring \
+            -f k8s/prometheus/values-kube-prom.yaml \
+            --timeout 15m
+
+      - name: Wait for CRDs
+        run: |
+          echo "Waiting for CRDs..."
+          for i in {1..30}; do
+            if kubectl get crd servicemonitors.monitoring.coreos.com 2>/dev/null; then
+              echo "CRDs ready"
+              break
+            fi
+            sleep 10
+          done
+
+      - name: Wait for Prometheus
+        run: |
+          echo "Waiting for Prometheus..."
+          kubectl -n monitoring wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus --timeout=600s || echo "Timeout but continuing"
+          kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus
+
+      - name: Wait for Grafana
+        run: |
+          echo "Waiting for Grafana..."
+          kubectl -n monitoring wait --for=condition=ready pod -l app.kubernetes.io/name=grafana --timeout=600s || echo "Grafana not ready yet"
+          kubectl -n monitoring get pods -l app.kubernetes.io/name=grafana
+
+      - name: Check Grafana logs if crashed
+        if: failure()
+        run: |
+          echo "Checking Grafana status..."
+          POD=$(kubectl -n monitoring get pods -l app.kubernetes.io/name=grafana -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n monitoring describe pod $POD
+          kubectl -n monitoring logs $POD --all-containers --tail=100 || true
+
+      - name: Apply metrics Service + ServiceMonitors
+        run: |
+          kubectl apply -f k8s/backend-metrics-service.yaml
+          kubectl apply -f k8s/prometheus/backend-servicemonitor-staging.yaml
+          kubectl apply -f k8s/prometheus/backend-servicemonitor-prod.yaml
+
+      - name: Verify ServiceMonitors
+        run: |
+          sleep 10
+          echo "=== ServiceMonitors in staging ==="
+          kubectl -n staging get servicemonitor || echo "None"
+          echo ""
+          echo "=== ServiceMonitors in prod ==="
+          kubectl -n prod get servicemonitor || echo "None"
+
+      - name: Show monitoring resources
+        run: |
+          echo "=========================================="
+          echo "MONITORING RESOURCES"
+          echo "=========================================="
+          kubectl -n monitoring get pods -o wide
+          echo ""
+          kubectl -n monitoring get svc
+
+      - name: Get access information
+        run: |
+          echo "=========================================="
+          echo "PROMETHEUS ACCESS"
+          echo "=========================================="
+          echo "Port-forward command:"
+          echo "  kubectl -n monitoring port-forward svc/monitor-kube-prometheus-prometheus 9090:9090"
+          echo ""
+          echo "Example queries:"
+          echo "  sum(rate(http_requests_total[5m])) by (color)"
+          echo "  active_connections{color=\"blue\"}"
+          echo "  active_connections{color=\"green\"}"
+          echo ""
+          echo "=========================================="
+          echo "GRAFANA ACCESS"
+          echo "=========================================="
+          
+          for i in {1..30}; do
+            IP=$(kubectl -n monitoring get svc monitor-grafana -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            if [ -n "$IP" ]; then
+              echo "URL: http://$IP"
+              echo "Username: admin"
+              echo "Password: admin123"
+              exit 0
+            fi
+            sleep 10
+          done
+          
+          echo "LoadBalancer IP pending. Check with:"
+          echo "  kubectl -n monitoring get svc monitor-grafana"

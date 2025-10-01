@@ -20,7 +20,8 @@ spec:
     spec:
       containers:
       - name: backend
-        image: REPLACE_ACR/login/newsflow-backend:REPLACE_TAG
+        image: REPLACE_ACR/newsflow-backend:REPLACE_TAG
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
@@ -36,6 +37,38 @@ spec:
             configMapKeyRef:
               name: backend-config
               key: NEWSAPI_URL
+        - name: COLOR
+          value: "green"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 3
+          timeoutSeconds: 3
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
         volumeMounts:
         - name: data
           mountPath: /data
@@ -66,7 +99,8 @@ spec:
     spec:
       containers:
       - name: backend
-        image: REPLACE_ACR/login/newsflow-backend:REPLACE_TAG
+        image: REPLACE_ACR/newsflow-backend:REPLACE_TAG
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
@@ -82,6 +116,38 @@ spec:
             configMapKeyRef:
               name: backend-config
               key: NEWSAPI_URL
+        - name: COLOR
+          value: "green"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 3
+          timeoutSeconds: 3
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
         volumeMounts:
         - name: data
           mountPath: /data

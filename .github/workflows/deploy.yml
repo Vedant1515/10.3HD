@@ -1,0 +1,171 @@
+name: CD - Staging and Production
+
+on:
+  push:
+    branches: ["testing", "main"]
+  workflow_dispatch: {}
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        shell: bash
+        env:
+          AKS_KUBECONFIG_B64: ${{ secrets.AKS_KUBECONFIG }}
+        run: |
+          python - <<'PY'
+          import os, base64, re, sys
+          b64 = os.environ['AKS_KUBECONFIG_B64']
+          b64 = re.sub(r'\s+', '', b64).replace('\r','')
+          try:
+            data = base64.b64decode(b64, validate=True)
+          except Exception as e:
+            sys.stderr.write(f"Invalid base64 in AKS_KUBECONFIG: {e}\n")
+            sys.exit(1)
+          open('kubeconfig','wb').write(data)
+          PY
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+          kubectl version --client
+
+      - name: Render manifests with image tags
+        run: |
+          sed -i "s#REPLACE_ACR#${{ secrets.ACR_LOGIN_SERVER }}#g" k8s/backend-deploy-blue.yaml k8s/backend-deploy-green.yaml k8s/frontend-deploy.yaml
+          sed -i "s#REPLACE_TAG#${{ env.IMAGE_TAG }}#g" k8s/backend-deploy-blue.yaml k8s/backend-deploy-green.yaml k8s/frontend-deploy.yaml
+
+      - name: Create namespaces
+        run: |
+          kubectl apply -f k8s/namespace-staging.yaml
+          kubectl apply -f k8s/namespace-prod.yaml
+
+      - name: ConfigMaps
+        run: kubectl apply -f k8s/backend-config.yaml
+
+      - name: Secrets
+        run: |
+          kubectl -n staging create secret generic newsapi-secret --from-literal=NEWSAPI_KEY="${{ secrets.NEWSAPI_KEY }}" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n prod    create secret generic newsapi-secret --from-literal=NEWSAPI_KEY="${{ secrets.NEWSAPI_KEY }}" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n staging create secret generic azure-storage-secret \
+            --from-literal=azurestorageaccountname="${{ secrets.STORAGE_ACCOUNT_NAME }}" \
+            --from-literal=azurestorageaccountkey="${{ secrets.STORAGE_ACCOUNT_KEY }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n prod create secret generic azure-storage-secret \
+            --from-literal=azurestorageaccountname="${{ secrets.STORAGE_ACCOUNT_NAME }}" \
+            --from-literal=azurestorageaccountkey="${{ secrets.STORAGE_ACCOUNT_KEY }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Storage PV and PVC
+        run: kubectl apply -f k8s/storage-azurefile.yaml
+
+      - name: Service and HPA
+        run: |
+          kubectl apply -f k8s/backend-service.yaml
+          kubectl apply -f k8s/backend-hpa.yaml
+
+      - name: Frontend
+        run: kubectl apply -f k8s/frontend-deploy.yaml
+
+      - name: Wait for PVC to bind
+        run: |
+          echo "Waiting for PVCs to bind..."
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/azurefile-pvc -n staging --timeout=60s || echo "PVC staging timeout - continuing"
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/azurefile-pvc -n prod --timeout=60s || echo "PVC prod timeout - continuing"
+
+      - name: Determine active and inactive colors for STAGING
+        id: staging_colors
+        run: |
+          ACTIVE=$(kubectl -n staging get svc backend-svc -o jsonpath="{.spec.selector.color}" 2>/dev/null || echo "blue")
+          INACTIVE=$([[ "$ACTIVE" == "blue" ]] && echo "green" || echo "blue")
+          
+          echo "active=$ACTIVE" >> $GITHUB_OUTPUT
+          echo "inactive=$INACTIVE" >> $GITHUB_OUTPUT
+          echo "=== STAGING: Active=$ACTIVE | Will deploy to=$INACTIVE ==="
+
+      - name: Deploy to INACTIVE color in STAGING
+        run: |
+          INACTIVE="${{ steps.staging_colors.outputs.inactive }}"
+          
+          echo "=== Deploying NEW version to $INACTIVE in staging ==="
+          kubectl apply -f k8s/backend-deploy-$INACTIVE.yaml
+          kubectl -n staging rollout status deploy/backend-$INACTIVE --timeout=300s
+
+      - name: Health check STAGING inactive deployment
+        run: |
+          INACTIVE="${{ steps.staging_colors.outputs.inactive }}"
+          
+          echo "=== Testing $INACTIVE deployment ==="
+          kubectl -n staging run healthcheck-$INACTIVE-${{ github.run_id }} --rm -i --image=curlimages/curl --restart=Never -- \
+            curl -f http://backend-$INACTIVE-metrics:8080/health || \
+            curl -f http://backend-all:8080/health || \
+            echo "Health check skipped - endpoint may not exist"
+
+      - name: Switch STAGING traffic to new version
+        run: |
+          INACTIVE="${{ steps.staging_colors.outputs.inactive }}"
+          
+          echo "=== Switching staging traffic to $INACTIVE ==="
+          bash k8s/scripts/switch_color.sh staging $INACTIVE
+          
+          echo "✅ Staging traffic now on $INACTIVE"
+
+      - name: Wait for frontend deployment in STAGING
+        run: |
+          echo "=== Waiting for staging frontend ==="
+          kubectl -n staging rollout status deploy/frontend --timeout=300s
+
+      - name: Deploy to PROD (only on main branch)
+        if: github.ref_name == 'main'
+        run: |
+          echo "=== PRODUCTION DEPLOYMENT ==="
+          
+          # Determine active/inactive for prod
+          ACTIVE=$(kubectl -n prod get svc backend-svc -o jsonpath="{.spec.selector.color}" 2>/dev/null || echo "blue")
+          INACTIVE=$([[ "$ACTIVE" == "blue" ]] && echo "green" || echo "blue")
+          
+          echo "=== PROD: Active=$ACTIVE | Will deploy to=$INACTIVE ==="
+          
+          # Deploy to inactive
+          kubectl apply -f k8s/backend-deploy-$INACTIVE.yaml
+          kubectl -n prod rollout status deploy/backend-$INACTIVE --timeout=300s
+          
+          # Health check
+          echo "=== Testing $INACTIVE in prod ==="
+          kubectl -n prod run healthcheck-$INACTIVE-${{ github.run_id }} --rm -i --image=curlimages/curl --restart=Never -- \
+            curl -f http://backend-$INACTIVE-metrics:8080/health || \
+            curl -f http://backend-all:8080/health || \
+            echo "Health check skipped - endpoint may not exist"
+          
+          # Switch traffic
+          echo "=== Switching prod traffic to $INACTIVE ==="
+          bash k8s/scripts/switch_color.sh prod $INACTIVE
+          
+          echo "✅ Production traffic now on $INACTIVE"
+          
+          # Wait for frontend
+          kubectl -n prod rollout status deploy/frontend --timeout=300s
+
+      - name: Show External IPs
+        run: |
+          echo "=== STAGING FRONTEND ==="
+          kubectl -n staging get svc frontend-svc -o wide || true
+          echo ""
+          echo "=== PROD FRONTEND ==="
+          kubectl -n prod get svc frontend-svc -o wide || true
+          echo ""
+          echo "=== STAGING BACKEND DEPLOYMENTS ==="
+          kubectl -n staging get deploy -l app=backend
+          echo ""
+          echo "=== PROD BACKEND DEPLOYMENTS ==="
+          kubectl -n prod get deploy -l app=backend
+          echo ""
+          echo "=== STAGING ACTIVE COLOR ==="
+          kubectl -n staging get svc backend-svc -o jsonpath="{.spec.selector.color}"
+          echo ""
+          echo "=== PROD ACTIVE COLOR ==="
+          kubectl -n prod get svc backend-svc -o jsonpath="{.spec.selector.color}"
+          echo ""

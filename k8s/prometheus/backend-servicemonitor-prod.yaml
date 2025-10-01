@@ -2,7 +2,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: backend-blue
-  namespace: staging
+  namespace: prod
   labels:
     app: backend
     color: blue
@@ -18,13 +18,13 @@ spec:
     scrapeTimeout: 10s
   namespaceSelector:
     matchNames:
-    - staging
+    - prod
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: backend-green
-  namespace: staging
+  namespace: prod
   labels:
     app: backend
     color: green
@@ -40,4 +40,4 @@ spec:
     scrapeTimeout: 10s
   namespaceSelector:
     matchNames:
-    - staging
+    - prod
