@@ -6,19 +6,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  check_deployment:
-    runs-on: ubuntu-latest
-    outputs:
-      deploy_success: ${{ steps.check.outputs.success }}
-    steps:
-      - name: Check if deployment exists
-        id: check
-        run: |
-          echo "success=true" >> $GITHUB_OUTPUT
-
   setup_monitoring:
-    needs: [check_deployment]
-    if: needs.check_deployment.outputs.deploy_success == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,16 +36,15 @@ jobs:
       - name: Check if monitoring already installed
         id: check_monitoring
         run: |
-          if helm list -n monitoring | grep -q monitor; then
+          if helm list -n monitoring 2>/dev/null | grep -q monitor; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Monitoring stack already installed"
+            echo "✅ Monitoring stack already installed, skipping installation"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Monitoring stack not found, will install"
+            echo "📦 Monitoring stack not found, will install"
           fi
 
       - name: Install Helm
-        if: steps.check_monitoring.outputs.exists == 'false'
         uses: azure/setup-helm@v4
 
       - name: Add repos
@@ -69,25 +56,53 @@ jobs:
       - name: Create monitoring namespace
         run: kubectl create ns monitoring --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Install kube-prometheus-stack
+      - name: Install kube-prometheus-stack (without wait)
         if: steps.check_monitoring.outputs.exists == 'false'
         run: |
           helm upgrade --install monitor prometheus-community/kube-prometheus-stack \
             -n monitoring \
             -f k8s/prometheus/values-kube-prom.yaml \
-            --wait \
-            --timeout 10m
+            --timeout 15m \
+            --debug
 
-      - name: Wait for monitoring stack
+      - name: Wait for CRDs to be ready
+        if: steps.check_monitoring.outputs.exists == 'false'
         run: |
-          echo "Waiting for Prometheus Operator..."
-          kubectl -n monitoring wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus-operator --timeout=300s || true
-          
-          echo "Waiting for Grafana..."
-          kubectl -n monitoring wait --for=condition=ready pod -l app.kubernetes.io/name=grafana --timeout=300s || true
-          
-          echo "Waiting for Prometheus..."
-          kubectl -n monitoring wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus --timeout=300s || true
+          echo "Waiting for Prometheus CRDs..."
+          for i in {1..30}; do
+            if kubectl get crd servicemonitors.monitoring.coreos.com 2>/dev/null; then
+              echo "✅ CRDs are ready"
+              break
+            fi
+            echo "Waiting for CRDs... attempt $i/30"
+            sleep 10
+          done
+
+      - name: Wait for Prometheus Operator
+        run: |
+          echo "Waiting for Prometheus Operator deployment..."
+          kubectl -n monitoring wait --for=condition=available deployment/monitor-kube-prometheus-operator --timeout=600s || true
+          kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus-operator
+
+      - name: Wait for Grafana
+        run: |
+          echo "Waiting for Grafana deployment..."
+          kubectl -n monitoring wait --for=condition=available deployment/monitor-grafana --timeout=600s || true
+          kubectl -n monitoring get pods -l app.kubernetes.io/name=grafana
+
+      - name: Wait for Prometheus pods
+        run: |
+          echo "Waiting for Prometheus statefulset..."
+          for i in {1..60}; do
+            READY=$(kubectl -n monitoring get statefulset -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].status.readyReplicas}' 2>/dev/null || echo "0")
+            if [ "$READY" -gt 0 ]; then
+              echo "✅ Prometheus is ready"
+              break
+            fi
+            echo "Waiting for Prometheus... attempt $i/60"
+            sleep 10
+          done
+          kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus
 
       - name: Apply metrics Service + ServiceMonitors
         run: |
@@ -97,41 +112,48 @@ jobs:
 
       - name: Verify ServiceMonitors
         run: |
+          sleep 10
           echo "=== ServiceMonitors in staging ==="
-          kubectl -n staging get servicemonitor || echo "No ServiceMonitors found in staging"
+          kubectl -n staging get servicemonitor || echo "None found"
           echo ""
           echo "=== ServiceMonitors in prod ==="
-          kubectl -n prod get servicemonitor || echo "No ServiceMonitors found in prod"
+          kubectl -n prod get servicemonitor || echo "None found"
           echo ""
           echo "=== All monitoring pods ==="
-          kubectl -n monitoring get pods
+          kubectl -n monitoring get pods -o wide
 
       - name: Show Grafana access info
         run: |
-          echo "=== Waiting for Grafana LoadBalancer IP ==="
-          for i in {1..60}; do
+          echo "=== Getting Grafana LoadBalancer IP ==="
+          for i in {1..30}; do
             IP=$(kubectl -n monitoring get svc monitor-grafana -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
             HN=$(kubectl -n monitoring get svc monitor-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
             if [ -n "$IP" ] || [ -n "$HN" ]; then
               echo "=========================================="
-              echo "Grafana is ready!"
+              echo "✅ GRAFANA IS READY!"
+              echo "=========================================="
               echo "URL: http://$IP$HN"
               echo "Username: admin"
               echo "Password: admin123"
               echo "=========================================="
               echo ""
-              echo "To access Prometheus:"
+              echo "📊 PROMETHEUS ACCESS:"
               echo "kubectl -n monitoring port-forward svc/monitor-kube-prometheus-prometheus 9090:9090"
               echo "Then visit: http://localhost:9090"
               echo ""
-              echo "Prometheus Queries to Try:"
-              echo "- sum(rate(http_requests_total[5m])) by (color)"
-              echo "- active_connections"
-              echo "- rate(news_api_calls_total[5m])"
+              echo "📈 USEFUL QUERIES:"
+              echo "  sum(rate(http_requests_total[5m])) by (color)"
+              echo "  active_connections"
+              echo "  rate(news_api_calls_total[5m])"
+              echo ""
+              echo "🎨 GRAFANA DASHBOARDS TO IMPORT:"
+              echo "  - Kubernetes Pods (ID: 6417)"
+              echo "  - Node Exporter (ID: 1860)"
+              echo "=========================================="
               exit 0
             fi
-            echo "Waiting for LoadBalancer... attempt $i/60"
+            echo "Waiting for LoadBalancer IP... $i/30"
             sleep 10
           done
-          echo "Grafana service is running but LoadBalancer IP not assigned yet"
-          kubectl -n monitoring get svc monitor-grafana
+          echo "⚠️  LoadBalancer IP not yet assigned, but service is running:"
+          kubectl -n monitoring get svc monitor-grafana -o wide
