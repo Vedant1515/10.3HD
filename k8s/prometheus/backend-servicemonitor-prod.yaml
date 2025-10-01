@@ -1,14 +1,38 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: backend-monitor
+  name: backend-blue
   namespace: prod
   labels:
     app: backend
+    color: blue
 spec:
   selector:
     matchLabels:
       app: backend
+      color: blue
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s
+    scrapeTimeout: 10s
+  namespaceSelector:
+    matchNames:
+    - prod
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend-green
+  namespace: prod
+  labels:
+    app: backend
+    color: green
+spec:
+  selector:
+    matchLabels:
+      app: backend
+      color: green
   endpoints:
   - port: http
     path: /metrics
